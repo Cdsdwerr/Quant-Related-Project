@@ -1,0 +1,396 @@
+---
+title: "Final Project"
+author: "Frameworks 5205"
+date: "2023-07-30"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(readr)
+library(quantmod)
+library(PerformanceAnalytics)
+library(plotly)
+```
+
+```{r}
+setwd("/Users/nisargpatel/Documents/")
+
+data <- read.csv("2021_Q1-2022_Q2.csv")
+
+# dropping index, ticker, sub-industry (124 unique values), and publish date
+data <- data[, -c(1, 2, 6, 17)]
+
+# assigning numbers to sectors to make compatible with below analysis
+data$GICS.Sector <- as.integer(factor(data$GICS.Sector, levels = unique(data$GICS.Sector)))
+
+# ranking buckets of revenue, net income, and market cap to make compatible with below analysis
+data <- data %>% mutate(Revenue.Bucket = parse_number(Revenue.Bucket)) %>%
+  arrange(Revenue.Bucket) %>% mutate(Revenue.Bucket = as.integer(factor(Revenue.Bucket, levels = unique(Revenue.Bucket))))
+
+data <- data %>% mutate(NI.Bucket = parse_number(NI.Bucket)) %>%
+  arrange(NI.Bucket) %>% mutate(NI.Bucket = as.integer(factor(NI.Bucket, levels = unique(NI.Bucket))))
+
+data <- data %>% mutate(Market.Cap.Bucket = parse_number(Market.Cap.Bucket)) %>%
+  arrange(Market.Cap.Bucket) %>% mutate(Market.Cap.Bucket = as.integer(factor(Market.Cap.Bucket, levels = unique(Market.Cap.Bucket))))
+
+# extracting numbers e.g., rankings from necessary columns
+data <- data %>% mutate(Quarter = parse_number(Quarter), Volume_Bin = parse_number(Volume_Bin), Adj_Close_Bin = parse_number(Adj_Close_Bin), High_Bin = parse_number(High_Bin), Low_Bin = parse_number(Low_Bin), High_Low_Diff_Bin = parse_number(High_Low_Diff_Bin))
+
+# Selecting binned columns
+binned <- data[, c(3, 9, 10, 11, 12, 13, 19, 20, 21)]
+
+corr_matrix_binned <- round(cor(binned), 3)
+
+library(ggcorrplot)
+ggcorrplot(cor(binned),colors = c('red','white','green'),type = 'lower')
+# interesting to me that volume is negatively correlated with adjusted close, high, low, and high-low diff
+# also high-low diff and adjusted close are strongly correlated, does this make sense?
+# also volume seems to be decently correlated to sector
+# other correlations make sense (adjusted close/high/low/high_low_diff, net income/revenue/volume), but maybe we can exploit these more interesting correlations
+
+library(psych)
+cortest.bartlett(cor(binned),n = 30)
+# conclusion: significant test, therefore suitable for factor analysis
+
+KMO(r = cor(binned))
+# conclusion: overall MSA = 0.82 > 0.5, therefore suitable for factor analysis
+
+scree(cor(binned),factors = T, pc=T)
+
+data.frame(factor = 1:ncol(binned), eigen = eigen(cor(binned))$values)
+# conclusion: both the scree plot and eigen values suggest we go with 2 factors
+
+fa.parallel(binned,fa='fa',fm = 'pa')
+# parallel analysis confirms 2 factors
+
+result_binned <- fa(r = binned,nfactors = 2,fm = 'pa',rotate = 'none')
+result_binned$Vaccounted
+
+data.frame(communality = result_binned$communality)
+
+
+######### MAPPING VARIABLES TO FACTORS 
+
+### Binned Variables Only 
+
+# Checking the original loadings
+print(result_binned$loadings, cut=.15) 
+
+# Orthogonal rotation
+fa_varimax_binned = fa(r = binned,nfactors = 2,fm = 'pa',rotate = 'varimax')
+print(fa_varimax_binned$loadings,cut=0.15) 
+
+# Oblique rotation
+fa_oblimin_binned = fa(r = binned,nfactors = 2,fm = 'pa',rotate = 'oblimin')
+print(fa_oblimin_binned$loadings,cut=0.15)
+# Both rotations mostly identical so opting for orthogonal rotation 
+fa.diagram(fa_varimax_binned,sort = T)
+
+
+# Because it wouldn't make sense to average any of the variables, we're opting for choosing the variable which the largest factor loading
+
+## Binned 
+factor1_surrogate_binned = data[,'High_Bin']
+factor2_surrogate_binned = data[,'NI.Bucket']
+
+
+```
+
+```{r}
+setwd("/Users/nisargpatel/Documents/")
+  
+# reading in full dataframe again
+df = read.csv("2021_Q1-2022_Q2.csv") 
+head(df)
+
+# filtering data to the columns we care about here 
+df = df %>% select(Ticker, Year, Quarter, High_Bin, NI.Bucket, Net.Income, Publish.Date)
+
+find_matching_tickers <- function(stock_data, input_tickers, year, quarter) {
+  # params: 
+   # stock_data: dataframe with ticker, factors, year, and quarter
+   # input_tickers: vector of tickers we want to base our portfolio off of 
+   # year: target year 
+   # quarter: target quarter
+  
+  # outputs: 
+   # data.frame of Tickers
+  
+  # Filter data based on the year and quarter
+  filtered_data <- stock_data[(stock_data$Year == year) & (stock_data$Quarter == quarter), ]
+  
+  
+  # check whether the earnings of the input stocks are positive or negative 
+  input_earnings_check <- nrow(filtered_data %>% filter((Ticker %in% input_tickers) & (Net.Income > 0)))
+  
+  if(input_earnings_check > 0){
+  
+  # Consider whether to check that our selected stock's publish date is before the publish date of our portfolio of selected stocks 
+  
+  # Get the factors for the selected stocks
+  factor_high_bin <- filtered_data[(filtered_data$Ticker %in% input_tickers), 'High_Bin']
+  factor_NI_Bucket <- filtered_data[(filtered_data$Ticker %in% input_tickers), 'NI.Bucket'] 
+  
+  # find the other tickers with the same factors 
+  output_tickers <- filtered_data[(filtered_data$High_Bin == factor_high_bin) & (filtered_data$NI.Bucket == factor_NI_Bucket),]
+  output_tickers <- output_tickers %>% filter(!(Ticker %in% input_tickers)) %>% select(Ticker)
+  
+  publish_data <- filtered_data[filtered_data$Ticker %in% input_tickers, 'Publish.Date']
+  
+  return(c(unlist(output_tickers),input_tickers))
+  } 
+  
+  else { 
+  return('No positive earnings for selected stocks--please input another ticker.')  
+  }
+}
+
+portfolio = find_matching_tickers(df, c('AAPL'), 2021, 'Q1')
+portfolio
+```
+
+
+```{r}
+setwd("/Users/nisargpatel/Documents/")
+input_data = read.csv("2021_Q1-2022_Q2.csv") 
+
+
+# filtering data to the columns we care about here 
+df = input_data  %>% select(Ticker, Year, Quarter, High_Bin, NI.Bucket, Net.Income, Publish.Date)
+df <- df %>% mutate(Publish.Date = as.Date(Publish.Date))
+
+find_matching_tickers <- function(stock_data, input_tickers, year, quarter) {
+  # params: 
+  # stock_data: dataframe with ticker, factors, year, and quarter
+  # input_tickers: vector of tickers we want to base our portfolio off of 
+  # year: target year 
+  # quarter: target quarter
+  
+  # outputs: 
+  # data.frame of Tickers
+  
+  # Filter data based on the year and quarter
+  filtered_data <- stock_data[(stock_data$Year == year) & (stock_data$Quarter == quarter), ]
+  
+  input_ticker_publish_date <- filtered_data$Publish.Date[filtered_data$Ticker == input_tickers]
+  
+  # check whether the earnings of the input stocks are positive or negative 
+  input_earnings_check <- nrow(filtered_data %>% filter((Ticker %in% input_tickers & (Net.Income > 0))))
+  if(input_earnings_check > 0){
+    
+    # Consider whether to check that our selected stock's publish date is before the publish date of our portfolio of selected stocks 
+    
+    # Get the factors for the selected stocks
+    factor_high_bin <- filtered_data[(filtered_data$Ticker %in% input_tickers), 'High_Bin']
+    factor_NI_Bucket <- filtered_data[(filtered_data$Ticker %in% input_tickers), 'NI.Bucket'] 
+    
+    # find the other tickers with the same factors and later publish dates (via & (filtered_data$Publish.Date > input_ticker_publish_date))
+    output_tickers <- filtered_data[(filtered_data$High_Bin == factor_high_bin) & (filtered_data$NI.Bucket == factor_NI_Bucket) & (filtered_data$Publish.Date > input_ticker_publish_date),]
+    output_tickers <- output_tickers %>% filter(!(Ticker %in% input_tickers)) %>% select(Ticker)
+    
+    return(c(unlist(na.omit(output_tickers)), input_tickers))
+  } 
+  
+  else { 
+    return('Negative net income!')  
+  }
+}
+
+lead_stocks <- c("AAPL", "MSFT", "GOOG", "TSLA")
+
+## function to generate daily returns graph
+generate_returns <- function(lead_stock) {
+  total_results <- list()
+  portfolio_returns <- xts()
+  tryCatch({
+    for (i in 1:6) {
+      year <- 2021
+      quarter <- i
+      if (quarter > 4){
+        quarter <- quarter - 4
+        year <- 2022
+      }
+      quarter <- paste0("Q", quarter)
+      key <- paste0(year, quarter)
+      
+      quarter_results <- data.frame(Stock = character(), Sharpe = numeric())
+      # Add Returns = numeric(), Volatility = numeric() if possible
+      
+      quarter_portfolio <- find_matching_tickers(df, lead_stock, year, quarter)
+      
+      
+      start_date <- input_data %>% filter(Ticker == lead_stock, Year == year, Quarter == quarter) %>% select(Publish.Date)
+      start_date <- as.Date(unlist(start_date))
+      end_date <- start_date + months(3) - days(1)
+      
+      closing_prices <- xts()
+      for (ticker in quarter_portfolio){
+        getSymbols(ticker, from = start_date, to = end_date)
+        
+        # For just the stock
+        single_stock_close_price <- Ad(get(ticker))
+        single_stock_vol <- sd(single_stock_close_price)
+        single_stock_returns <- na.omit(ROC(single_stock_close_price))
+        single_stock_returns <- Return.portfolio(single_stock_returns)
+        single_stock_sharpe <- SharpeRatio(single_stock_returns, Rf = 0, p = 0.95, FUN = "StdDev")
+        single_stock_row <- data.frame(Stock = ticker, Sharpe = single_stock_sharpe)
+        
+        quarter_results <- rbind(quarter_results, single_stock_row)
+        
+        # Adding stock data to portfolio for full portfolio calculation
+        closing_prices <- merge(closing_prices, Ad(get(ticker)))
+        rm(list = ticker)
+      }
+      
+      returns <- na.omit(ROC(closing_prices))
+      
+      quarterly_returns <- Return.portfolio(returns, weights = rep(1, ncol(returns))/ncol(returns))
+      
+      quarterly_sharpe <- SharpeRatio(quarterly_returns, Rf = 0, p = 0.95, FUN = "StdDev")
+      
+      portfolio_row <- data.frame(Stock = 'Portfolio', Sharpe = quarterly_sharpe)
+      
+      quarter_results <- rbind(quarter_results, portfolio_row)
+      
+      rownames(quarter_results) <- quarter_results$Stock
+      quarter_results$Stock <- NULL
+      # colnames(quarter_results) <- "Sharpe_Ratio"
+      
+      total_results[[key]] <- quarter_results
+      
+      portfolio_returns <- rbind(portfolio_returns, quarterly_returns)
+    }
+    
+    stock_name <- deparse(substitute(lead_stock))
+    
+    plot_portfolio_returns <- function(portfolio_returns, stock_name) {
+      # Convert xts object to data frame
+      df_portfolio_returns <- data.frame(Date = as.Date(index(portfolio_returns)), Returns = coredata(portfolio_returns))
+      
+      # Plot the ggplot chart and pass the object name to ggtitle() function
+      # Use the Red horizontal line to indicate the state of no returns   
+      plot <- ggplot(df_portfolio_returns, aes(x = Date, y = Returns)) +
+        geom_line() +
+        geom_hline(yintercept = 0, col = "red") +
+        labs(x = "Date Measured Per Quarter", y = "Portfolio Returns") +
+        ggtitle(paste("Equal-Dollar Weight Portfolio Returns For ", stock_name)) +
+        scale_x_date(date_breaks = "3 months", date_labels = "%Y-%m")  # Customize x-axis breaks and labels
+      
+      print(ggplotly(plot))
+    }
+    plot_portfolio_returns(portfolio_returns, stock_name)
+  }, error = function(e) {
+    cat("Error in quarter", quarter, " of year ", year, ": ", conditionMessage(e), "\n")
+    next
+  })
+  
+  # sharpe_ratio <- SharpeRatio(portfolio_returns, Rf = 0, p = 0.95, FUN = "StdDev")
+  # sharpe_ratio <- as.data.frame(sharpe_ratio, col.names = "Sharpe_Ratio")
+  # colnames(results_df) <- c("Sharpe_Ratio")
+  # results_df["Overall Sharpe", ] <- sharpe_ratio
+  return(total_results)
+}
+
+
+# Run the returns function for a specific lead stock (e.g., AAPL)
+aapl_df <- generate_returns('AAPL')
+# msft_df<-generate_returns('MSFT')
+# tsla_df<-generate_returns('TSLA')
+# goog_df<-generate_returns('GOOG')
+
+```
+
+
+```{r}
+
+# function to generate sharpe ratio for lead stocks
+backtest_individual_stocks <- function(lead_stock) {
+  results_list <- list()
+  tryCatch({
+    for (i in 1:6) {
+      year <- 2021
+      quarter <- i
+      if (quarter > 4) {
+        quarter <- quarter - 4
+        year <- 2022
+      }
+      quarter <- paste0("Q", quarter)
+      
+      quarter_portfolio <- find_matching_tickers(df, lead_stock, year, quarter)
+      
+      # Get the publish date of the lead stock
+      lead_stock_publish_date <- input_data %>% 
+        filter(Ticker == lead_stock, Year == year, Quarter == quarter) %>% 
+        pull(Publish.Date) %>% 
+        as.Date()
+      
+      stock_returns <- xts()
+      
+      for (ticker in quarter_portfolio) {
+      
+        current_stock_publish_date <- input_data %>% 
+          filter(Ticker == ticker, Year == year, Quarter == quarter) %>% 
+          pull(Publish.Date) %>% 
+          as.Date()
+        
+        # Filter out stocks with Q1 publish date before AAPL's Q2 date
+        if (i == 1 && current_stock_publish_date < lead_stock_publish_date) {
+          next
+        }
+        
+        # Filter out stocks with Q1 publish date after AAPL's Q2 date
+        if (i == 2 && current_stock_publish_date > lead_stock_publish_date) {
+          next
+        }
+        
+        tryCatch({
+          stock_data <- new.env()
+          getSymbols(ticker, from = current_stock_publish_date, to = current_stock_publish_date + months(3) - days(1), env = stock_data)
+          closing_prices <- Ad(stock_data[[ticker]])
+          stock_returns <- merge(stock_returns, na.omit(ROC(closing_prices)))
+        }, error = function(e) {
+          cat("Error fetching data for ticker ", ticker, ": ", conditionMessage(e), "\n")
+        })
+      }
+      
+      for (ticker in colnames(stock_returns)) {
+        individual_returns <- stock_returns[, ticker]
+        individual_sharpe <- SharpeRatio(individual_returns, Rf = 0, p = 0.95, FUN = "StdDev")
+        results_list[[paste0(ticker, "_", year, "_", quarter)]] <- individual_sharpe[1,1] 
+      }
+    }
+  }, error = function(e) {
+    cat("Error in quarter", quarter, " of year ", year, ": ", conditionMessage(e), "\n")
+    next
+  })
+
+  return(results_list)
+}
+
+sharpe_results_aapl <- backtest_individual_stocks('AAPL')
+sharpe_ratio_aapl <- mean(unlist(sharpe_results_aapl))
+print(sharpe_ratio_aapl)
+
+sharpe_results_msft <- backtest_individual_stocks('MSFT')
+sharpe_ratio_msft <- mean(unlist(sharpe_results_msft))
+print(sharpe_ratio_msft)
+
+sharpe_results_tsla <- backtest_individual_stocks('TSLA')
+sharpe_ratio_tsla <- mean(unlist(sharpe_results_tsla))
+print(sharpe_ratio_tsla)
+
+sharpe_results_goog <- backtest_individual_stocks('GOOG')
+sharpe_ratio_goog <- mean(unlist(sharpe_results_goog))
+print(sharpe_ratio_goog)
+
+
+```
+
+
+
+
+
+
+
+
+
